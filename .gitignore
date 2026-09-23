@@ -1,0 +1,62 @@
+# Environment / Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+out/
+coverage/
+
+# Next.js
+.next/
+next-env.d.ts
+
+# Vercel
+.vercel/
+
+# TypeScript
+*.tsbuildinfo
+
+# Testing
+/test-results/
+/playwright-report/
+/playwright/.cache/
+blob-report/
+.vitest-cache/
+
+# Runtime / Logs
+*.log
+logs/
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# Local data / dev artifacts
+data/*
+!data/.gitkeep
+.blob-store/
+dump.rdb
+
+# Generated test fixtures
+fixtures/*
+!fixtures/.gitkeep
