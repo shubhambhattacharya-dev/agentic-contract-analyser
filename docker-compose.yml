@@ -1,0 +1,46 @@
+# Local development only — never use this config in production
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: elcara-redis
+
+    ports:
+      - "127.0.0.1:6379:6379"
+
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-devpassword}
+
+    command: >
+      redis-server
+      --requirepass "${REDIS_PASSWORD:-devpassword}"
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+
+    volumes:
+      - redis_data:/data
+
+    networks:
+      - elcara-net
+
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-devpassword}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  elcara-net:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local
