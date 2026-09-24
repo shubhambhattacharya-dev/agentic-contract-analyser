@@ -9,9 +9,8 @@ const CHILD_OVERLAP_TOKENS = 20 as const;
 // This is NOT an exact model tokenizer.
 const CHARS_PER_TOKEN = 4 as const;
 
-const PARAGRAPH_BOUNDARY = /\n{2,}/u;
-const SENTENCE_BOUNDARY = /(?<=[.!?])\s+/u;
-const WORD_BOUNDARY = /\s+/u;
+const PARAGRAPH_BOUNDARY_GLOBAL = /\n{2,}/gu;
+const SENTENCE_BOUNDARY_GLOBAL = /(?<=[.!?])\s+/gu;
 
 export type ChunkKind = "parent" | "child";
 
@@ -45,66 +44,8 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
-function normalizeWhitespace(text: string): string {
-  return text.replace(/\s+/gu, " ").trim();
-}
-
 function splitWords(text: string): string[] {
-  return text.split(WORD_BOUNDARY).filter(Boolean);
-}
-
-function splitSentences(text: string): string[] {
-  return text
-    .split(SENTENCE_BOUNDARY)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-}
-
-function splitOversizedSentence(
-  sentence: string,
-): string[] {
-  const estimatedTokens = estimateTokens(sentence);
-
-  if (estimatedTokens <= PARENT_TARGET_TOKENS) {
-    return [sentence];
-  }
-
-  logger.warn(
-    {
-      estimatedTokens,
-      limit: PARENT_TARGET_TOKENS,
-    },
-    "Sentence exceeds parent token target; splitting at word boundaries",
-  );
-
-  const words = splitWords(sentence);
-  const parts: string[] = [];
-
-  let currentWords: string[] = [];
-
-  for (const word of words) {
-    const candidate =
-      currentWords.length === 0
-        ? word
-        : `${currentWords.join(" ")} ${word}`;
-
-    if (
-      currentWords.length > 0 &&
-      estimateTokens(candidate) > PARENT_TARGET_TOKENS
-    ) {
-      parts.push(currentWords.join(" "));
-      currentWords = [word];
-      continue;
-    }
-
-    currentWords.push(word);
-  }
-
-  if (currentWords.length > 0) {
-    parts.push(currentWords.join(" "));
-  }
-
-  return parts;
+  return text.split(/\s+/u).filter(Boolean);
 }
 
 interface TextSpan {
@@ -113,46 +54,175 @@ interface TextSpan {
   endOffset: number;
 }
 
-function findExactSpan(
-  sourceText: string,
-  text: string,
-  searchFrom: number,
-): TextSpan {
-  if (text.length === 0) {
-    throw new DocumentChunkingError(
-      "Cannot create a chunk from empty text.",
-    );
-  }
-
-  const startOffset = sourceText.indexOf(
-    text,
-    searchFrom,
-  );
-
-  if (startOffset === -1) {
-    throw new DocumentChunkingError(
-      "Chunk could not be mapped to canonical document text.",
-    );
-  }
-
-  return {
-    text,
-    startOffset,
-    endOffset: startOffset + text.length,
-  };
+interface OffsetSpan {
+  start: number;
+  end: number;
 }
 
-function createParentTexts(
+/** Shrinks [start, end) past surrounding whitespace; returns null when empty. */
+function trimSpan(
+  source: string,
+  start: number,
+  end: number,
+): OffsetSpan | null {
+  let s = start;
+  let e = end;
+
+  while (s < e && /\s/u.test(source[s] ?? "")) {
+    s += 1;
+  }
+
+  while (e > s && /\s/u.test(source[e - 1] ?? "")) {
+    e -= 1;
+  }
+
+  return e > s ? { start: s, end: e } : null;
+}
+
+/** Splits [start, end) on a boundary regex, yielding trimmed absolute spans. */
+function splitIntoSpans(
+  source: string,
+  start: number,
+  end: number,
+  boundary: RegExp,
+): OffsetSpan[] {
+  const spans: OffsetSpan[] = [];
+
+  const slice = source.slice(start, end);
+
+  let pieceStart = 0;
+
+  const pushTrimmed = (pieceEnd: number): void => {
+    const trimmed = trimSpan(slice, pieceStart, pieceEnd);
+
+    if (trimmed) {
+      spans.push({
+        start: start + trimmed.start,
+        end: start + trimmed.end,
+      });
+    }
+  };
+
+  for (const match of slice.matchAll(boundary)) {
+    const separatorStart = match.index ?? 0;
+
+    pushTrimmed(separatorStart);
+
+    pieceStart = separatorStart + (match[0] ?? "").length;
+  }
+
+  pushTrimmed(slice.length);
+
+  return spans;
+}
+
+/** Word-start offsets within [start, end), absolute in the source text. */
+function wordStartsIn(source: string, start: number, end: number): number[] {
+  const offsets: number[] = [];
+
+  let index = start;
+
+  while (index < end) {
+    while (index < end && /\s/u.test(source[index] ?? "")) {
+      index += 1;
+    }
+
+    if (index >= end) {
+      break;
+    }
+
+    offsets.push(index);
+
+    while (index < end && !/\s/u.test(source[index] ?? "")) {
+      index += 1;
+    }
+  }
+
+  return offsets;
+}
+
+/**
+ * Splits an oversized sentence span at word boundaries. Parts are canonical
+ * slices — whitespace is preserved exactly, never re-joined.
+ */
+function splitOversizedSpan(
+  source: string,
+  span: OffsetSpan,
+): OffsetSpan[] {
+  const words = wordStartsIn(source, span.start, span.end);
+
+  if (words.length === 0) {
+    return [span];
+  }
+
+  // End offset of each word (first whitespace at/after its start).
+  const wordEnds = words.map((wordStart) => {
+    let wordEnd = wordStart;
+
+    while (wordEnd < span.end && !/\s/u.test(source[wordEnd] ?? "")) {
+      wordEnd += 1;
+    }
+
+    return wordEnd;
+  });
+
+  const parts: OffsetSpan[] = [];
+
+  let partStartIndex = 0;
+
+  for (let index = 1; index < words.length; index += 1) {
+    const partStart = wordAt(partStartIndex, words);
+    const nextWordEnd = wordEnds[index] ?? span.end;
+
+    if (
+      estimateTokens(source.slice(partStart, nextWordEnd)) >
+      PARENT_TARGET_TOKENS
+    ) {
+      const previousEnd = wordEnds[index - 1] ?? span.end;
+
+      parts.push({ start: partStart, end: previousEnd });
+
+      partStartIndex = index;
+    }
+  }
+
+  const finalStart = partStartIndex < words.length
+    ? wordAt(partStartIndex, words)
+    : span.start;
+
+  parts.push({ start: finalStart, end: span.end });
+
+  return parts;
+}
+
+function wordAt(
+  index: number,
+  words: number[],
+): number {
+  const value = words[index];
+
+  if (value === undefined) {
+    throw new DocumentChunkingError(
+      "Unable to split oversized sentence span.",
+    );
+  }
+
+  return value;
+}
+
+interface SentenceSpan {
+  start: number;
+  end: number;
+  tokens: number;
+}
+
+/** Paragraph and sentence spans for the whole document, offsets absolute. */
+function createParentSpans(
   documentText: string,
-): string[] {
-  const paragraphs = documentText
-    .split(PARAGRAPH_BOUNDARY)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean);
+): SentenceSpan[] {
+  const parents: SentenceSpan[] = [];
 
-  const parents: string[] = [];
-
-  let currentParts: string[] = [];
+  let currentParts: OffsetSpan[] = [];
   let currentTokens = 0;
 
   function flush(): void {
@@ -160,31 +230,58 @@ function createParentTexts(
       return;
     }
 
-    parents.push(currentParts.join(" "));
+    const first = currentParts[0];
+    const last = currentParts[currentParts.length - 1];
+
+    if (first && last) {
+      parents.push({
+        start: first.start,
+        end: last.end,
+        tokens: currentTokens,
+      });
+    }
+
     currentParts = [];
     currentTokens = 0;
   }
 
+  const paragraphs = splitIntoSpans(
+    documentText,
+    0,
+    documentText.length,
+    PARAGRAPH_BOUNDARY_GLOBAL,
+  );
+
   for (const paragraph of paragraphs) {
-    const sentences = splitSentences(paragraph);
+    let sentenceSpans = splitIntoSpans(
+      documentText,
+      paragraph.start,
+      paragraph.end,
+      SENTENCE_BOUNDARY_GLOBAL,
+    );
 
-    for (const sentence of sentences) {
-      const parts = splitOversizedSentence(sentence);
+    // Oversized sentences are split at word boundaries into canonical slices.
+    sentenceSpans = sentenceSpans.flatMap((span) =>
+      estimateTokens(documentText.slice(span.start, span.end)) >
+        PARENT_TARGET_TOKENS
+        ? splitOversizedSpan(documentText, span)
+        : [span],
+    );
 
-      for (const part of parts) {
-        const partTokens = estimateTokens(part);
+    for (const span of sentenceSpans) {
+      const partTokens = estimateTokens(
+        documentText.slice(span.start, span.end),
+      );
 
-        if (
-          currentParts.length > 0 &&
-          currentTokens + partTokens >
-            PARENT_TARGET_TOKENS
-        ) {
-          flush();
-        }
-
-        currentParts.push(part);
-        currentTokens += partTokens;
+      if (
+        currentParts.length > 0 &&
+        currentTokens + partTokens > PARENT_TARGET_TOKENS
+      ) {
+        flush();
       }
+
+      currentParts.push(span);
+      currentTokens += partTokens;
     }
 
     // Preserve paragraph boundaries.
@@ -197,36 +294,29 @@ function createParentTexts(
 function buildParents(
   documentText: string,
 ): DocumentChunk[] {
-  const parentTexts =
-    createParentTexts(documentText);
+  const parentSpans = createParentSpans(documentText);
 
   const parents: DocumentChunk[] = [];
 
-  let searchFrom = 0;
   let parentNumber = 1;
 
-  for (const parentText of parentTexts) {
-    if (parentText.length === 0) {
+  for (const span of parentSpans) {
+    const text = documentText.slice(span.start, span.end);
+
+    if (text.length === 0) {
       continue;
     }
-
-    const span = findExactSpan(
-      documentText,
-      parentText,
-      searchFrom,
-    );
 
     parents.push({
       id: `parent-${parentNumber}`,
       kind: "parent",
-      text: span.text,
-      startOffset: span.startOffset,
-      endOffset: span.endOffset,
-      tokenEstimate: estimateTokens(span.text),
+      text,
+      startOffset: span.start,
+      endOffset: span.end,
+      tokenEstimate: estimateTokens(text),
     });
 
     parentNumber += 1;
-    searchFrom = span.endOffset;
   }
 
   return parents;

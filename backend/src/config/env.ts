@@ -133,6 +133,29 @@ const InfraSchema = z.object({
     .string()
     .min(1)
     .optional(),
+
+  // LLM observability (Langfuse). Empty values disable tracing.
+  LANGFUSE_HOST: z
+    .string()
+    .optional(),
+
+  LANGFUSE_BASE_URL: z
+    .string()
+    .optional(),
+
+  LANGFUSE_PUBLIC_KEY: z
+    .string()
+    .optional(),
+
+  LANGFUSE_SECRET_KEY: z
+    .string()
+    .optional(),
+
+  // When "true", raw prompt/completion text is sent to Langfuse.
+  // Default: only sizes/latencies/metadata — no contract text.
+  LANGFUSE_LOG_CONTENT: z
+    .string()
+    .optional(),
 });
 
 // ─────────────────────────────────────────────────────────────

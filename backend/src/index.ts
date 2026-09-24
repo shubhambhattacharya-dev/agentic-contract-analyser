@@ -1,5 +1,6 @@
 import { env } from "./config/env.js";
 import { logger } from "./lib/logger.js";
+import { flushObservability } from "./lib/observability.js";
 import { wireProcessHandlers } from "./middleware/error-handler.js";
 import { app } from "./app.js";
 
@@ -55,8 +56,11 @@ function shutdown(signal: string): void {
 
   forceExit.unref();
 
-  server.close(() => {
+  server.close(async () => {
     logger.info("HTTP server closed gracefully.");
+
+    // Flush queued observability data before the process dies.
+    await flushObservability();
 
     clearTimeout(forceExit);
     process.exit(0);

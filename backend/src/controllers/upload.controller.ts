@@ -6,8 +6,15 @@ import type {
 
 import { logger } from "../lib/logger.js";
 import { HttpStatus } from "../middleware/error-handler.js";
-import { uploadDocument } from "../services/upload.service.js";
+import { ingestDocument } from "../services/ingestion/ingest.service.js";
+import type { SupportedDocumentMimeType } from "../types/document.types.js";
 
+/**
+ * POST /api/upload - the full ingestion seam:
+ * upload -> extract -> structure -> chunk -> BM25 -> embeddings -> persist.
+ * Returns 201 with the document record, or 422 for scanned/unreadable files
+ * (nothing is saved in that case - the library stays clean).
+ */
 export async function uploadDocumentController(
   req: Request,
   res: Response,
@@ -29,16 +36,29 @@ export async function uploadDocumentController(
       return;
     }
 
-    const uploaded = await uploadDocument(req.file);
+    const result = await ingestDocument({
+      sessionId: req.sessionId,
+      buffer: req.file.buffer,
+      originalName: req.file.originalname,
+      // The multer fileFilter already restricted uploads to supported types.
+      mimeType: req.file.mimetype as SupportedDocumentMimeType,
+      size: req.file.size,
+    });
 
-    res.status(201).json({
-      message: "Document uploaded successfully.",
+    res.status(HttpStatus.CREATED).json({
+      message: "Document uploaded and processed successfully.",
       document: {
-        originalName: req.file.originalname,
-        mimeType: req.file.mimetype,
+        documentId: result.documentId,
+        originalName: result.originalName,
+        mimeType: result.mimeType,
         size: req.file.size,
-        pathname: uploaded.pathname,
+        pageCount: result.pageCount,
+        charCount: result.charCount,
+        wordCount: result.wordCount,
+        parentChunkCount: result.parentChunkCount,
+        childChunkCount: result.childChunkCount,
       },
+      status: result.status,
     });
   } catch (error) {
     next(error);

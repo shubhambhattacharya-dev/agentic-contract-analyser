@@ -1,10 +1,13 @@
-import { put } from "@vercel/blob";
-
 import { env } from "../config/env.js";
 import {
   AppError,
   HttpStatus,
 } from "../middleware/error-handler.js";
+import {
+  MIME_TO_EXTENSION,
+  type SupportedDocumentMimeType,
+} from "../types/document.types.js";
+import { store, type StoredFile } from "../lib/store.js";
 
 const ALLOWED_MIME_TYPES = [
   "application/pdf",
@@ -46,9 +49,8 @@ export class UploadFailedError extends AppError {
   }
 }
 
-export interface UploadedDocument {
-  url: string;
-  pathname: string;
+export interface UploadedDocument extends StoredFile {
+  originalName: string;
   contentType: AllowedMimeType;
   size: number;
 }
@@ -61,9 +63,17 @@ function isAllowedMimeType(
   );
 }
 
+/** The fields the uploader actually consumes - req.file satisfies this. */
+export type UploadFile = {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+  size: number;
+};
+
 function validateFile(
-  file: Express.Multer.File,
-): asserts file is Express.Multer.File & { mimetype: AllowedMimeType } {
+  file: UploadFile,
+): asserts file is UploadFile & { mimetype: AllowedMimeType } {
   if (!isAllowedMimeType(file.mimetype)) {
     throw new UnsupportedFileTypeError(file.mimetype);
   }
@@ -73,25 +83,42 @@ function validateFile(
   }
 }
 
+function storageKeyFor(
+  originalName: string,
+  mimeType: AllowedMimeType,
+): string {
+  const extension = MIME_TO_EXTENSION[mimeType];
+  // Client-supplied names are untrusted: keep the basename, drop anything
+  // outside a safe charset, and let the storage layer add its own suffix.
+  const safeBase =
+    originalName
+      .split(/[\/]/)
+      .pop()
+      ?.replace(/[^\w.\- ]+/g, "_")
+      .slice(0, 120) || "document";
+
+  return `documents/${safeBase}.${extension}`;
+}
+
+/**
+ * Validates and persists the raw binary through the storage abstraction.
+ * Document record creation and extraction happen in the ingestion service.
+ */
 export async function uploadDocument(
-  file: Express.Multer.File,
+  file: UploadFile,
 ): Promise<UploadedDocument> {
   validateFile(file);
 
   try {
-    const blob = await put(
-      `documents/${file.originalname}`,
+    const stored = await store.putFile(
+      storageKeyFor(file.originalname, file.mimetype),
       file.buffer,
-      {
-        access: "private",
-        addRandomSuffix: true,
-        contentType: file.mimetype,
-      },
+      file.mimetype,
     );
 
     return {
-      url: blob.url,
-      pathname: blob.pathname,
+      ...stored,
+      originalName: file.originalname,
       contentType: file.mimetype,
       size: file.size,
     };

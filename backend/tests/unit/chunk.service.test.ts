@@ -45,7 +45,6 @@ function createDocument(
         text,
         startOffset: 0,
         endOffset: text.length,
-        wordCount: words,
       },
     ],
     pageCount: 1,
@@ -118,7 +117,6 @@ describe("chunkDocument", () => {
             text: "",
             startOffset: 0,
             endOffset: 0,
-            wordCount: 0,
           },
         ],
       });

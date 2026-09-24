@@ -6,6 +6,8 @@ declare global {
     interface Request {
       /** Normalized correlation ID assigned by requestIdMiddleware. */
       requestId: string;
+      /** Session ID associated with the request. */
+      sessionId: string;
     }
   }
 }

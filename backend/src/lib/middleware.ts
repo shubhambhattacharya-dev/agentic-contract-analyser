@@ -7,6 +7,9 @@ import {
   parseSessionFromHeader,
 } from "./session.js";
 
+export { requireSession } from "../middleware/session.middleware.js";
+
+
 declare global {
   namespace Express {
     interface Request {

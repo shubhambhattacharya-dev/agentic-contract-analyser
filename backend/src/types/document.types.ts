@@ -67,3 +67,26 @@ export function isSupportedExtension(
     extension as SupportedDocumentExtension,
   );
 }
+
+/** Library record persisted per document (written by ingest.service.ts). */
+export interface DocumentMeta {
+  documentId: string;
+  originalName: string;
+  mimeType: string;
+  pageCount: number;
+  charCount: number;
+  wordCount: number;
+  parentChunkCount: number;
+  childChunkCount: number;
+  fileUrl: string;
+  filePathname: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+/** Value persisted under keys.docStatus (written by ingest.service.ts). */
+export interface DocumentStatusRecord {
+  state: string;
+  stage: string;
+  updatedAt: string;
+}

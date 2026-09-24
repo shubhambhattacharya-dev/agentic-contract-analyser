@@ -66,13 +66,21 @@ export function createSessionCookie(
   const parts = [
     `${SESSION_COOKIE_NAME}=${encodeURIComponent(sessionId)}`,
     "HttpOnly",
-    "SameSite=Lax",
     "Path=/",
     `Max-Age=${SESSION_MAX_AGE_SEC}`,
   ];
 
   if (isProduction) {
-    parts.push("Secure");
+    /*
+     * Frontend and backend deploy to different origins, so the session
+     * cookie is cross-site from the browser's perspective. Lax cookies are
+     * not sent on cross-origin XHR, which would silently reset the session
+     * on every request. None + Secure is the only combination that works
+     * for a cross-site SPA and stays secure.
+     */
+    parts.push("SameSite=None", "Secure");
+  } else {
+    parts.push("SameSite=Lax");
   }
 
   return parts.join("; ");

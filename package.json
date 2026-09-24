@@ -1,6 +1,13 @@
 {
-  "dependencies": {
-    "mammoth": "^1.12.3",
-    "pdf-parse": "^2.4.5"
+  "name": "elcara",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Agentic contract analyser — verified-quote chat over uploaded contracts",
+  "scripts": {
+    "dev": "npm --prefix backend run dev",
+    "typecheck": "npm --prefix backend run typecheck",
+    "test": "npm --prefix backend run test",
+    "build": "npm --prefix backend run build",
+    "start": "npm --prefix backend run start"
   }
 }

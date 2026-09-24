@@ -11,6 +11,9 @@ import {
 import { requestIdMiddleware } from "./middleware/request-id.js";
 import { requestLoggerMiddleware } from "./middleware/request-logger.js";
 
+import chatRoutes from "./routes/chat.routes.js";
+import compareRoutes from "./routes/compare.routes.js";
+import documentRoutes from "./routes/document.routes.js";
 import healthRoutes from "./routes/health.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 
@@ -30,6 +33,9 @@ app.use(requestLoggerMiddleware);
 
 app.use("/health", healthRoutes);
 app.use("/api/upload", uploadRoutes);
+app.use("/api/documents", documentRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/compare", compareRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
