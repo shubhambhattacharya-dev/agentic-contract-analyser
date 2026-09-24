@@ -26,6 +26,18 @@ jobs:
       run:
         working-directory: backend
 
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --requirepass devpassword
+          --health-cmd "redis-cli -a devpassword ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,6 +51,32 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Create test environment
+        run: |
+          cat > .env <<'EOF'
+          NODE_ENV=test
+          LOG_LEVEL=warn
+          PORT=8000
+          HOST=127.0.0.1
+          GROQ_API_KEY=test-groq-key-ci
+          GROQ_GENERATION_MODEL=openai/gpt-oss-120b
+          GOOGLE_GENERATIVE_AI_API_KEY=test-gemini-key-ci
+          GEMINI_GENERATION_MODEL=gemini-2.5-flash
+          GEMINI_EMBEDDING_MODEL=gemini-embedding-2
+          GENERATION_PROVIDER=groq
+          EMBEDDING_PROVIDER=gemini
+          GENERATION_FALLBACK_CHAIN=groq,gemini
+          REDIS_HOST=127.0.0.1
+          REDIS_PORT=6379
+          REDIS_PASSWORD=devpassword
+          MAX_FILE_BYTES=26214400
+          EMBED_BATCH_SIZE=100
+          MAX_AGENT_ROUNDS=4
+          RETRIEVAL_TOP_K=15
+          INGEST_MAX_DURATION=60
+          LANGFUSE_LOG_CONTENT=false
+          EOF
 
       - name: Secret scan
         run: |
