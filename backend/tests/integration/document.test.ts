@@ -173,22 +173,28 @@ describe("Document Library Integration Tests", () => {
   });
 
   // 6. missing session -> 401
-  it("6. returns 401 SESSION_REQUIRED when session cookie is missing", async () => {
+  it("6. auto-provisions a session on first contact (200 + Set-Cookie)", async () => {
+    // A brand-new browser session has no cookie yet. The global session
+    // middleware assigns one and issues Set-Cookie; the request must succeed
+    // against the fresh (empty) session instead of being rejected. This is
+    // the assignment's "no login" contract: sessions are anonymous and
+    // created on first use — never shared across browsers.
     const listRes = await request(app).get("/api/documents");
-    expect(listRes.status).toBe(401);
-    expect(listRes.body.error.code).toBe("SESSION_REQUIRED");
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.documents).toEqual([]);
+    expect(listRes.headers["set-cookie"]).toBeDefined();
 
     const getRes = await request(app).get(
       "/api/documents/ffffffff-ffff-4fff-8fff-ffffffffffff",
     );
-    expect(getRes.status).toBe(401);
-    expect(getRes.body.error.code).toBe("SESSION_REQUIRED");
+    expect(getRes.status).toBe(404);
+    expect(getRes.body.error.code).toBe("DOCUMENT_NOT_FOUND");
 
     const delRes = await request(app).delete(
       "/api/documents/ffffffff-ffff-4fff-8fff-ffffffffffff",
     );
-    expect(delRes.status).toBe(401);
-    expect(delRes.body.error.code).toBe("SESSION_REQUIRED");
+    expect(delRes.status).toBe(404);
+    expect(delRes.body.error.code).toBe("DOCUMENT_NOT_FOUND");
   });
 
   // 7. status endpoint
