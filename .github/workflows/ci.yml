@@ -26,21 +26,26 @@ jobs:
       run:
         working-directory: backend
 
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --requirepass devpassword
-          --health-cmd "redis-cli -a devpassword ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Start Redis
+        run: |
+          docker run -d --name ci-redis -p 6379:6379 redis:7-alpine \
+            redis-server --requirepass devpassword --appendonly no
+
+          for attempt in $(seq 1 30); do
+            if docker exec ci-redis redis-cli -a devpassword ping 2>/dev/null | grep -q PONG; then
+              echo "Redis is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Redis did not become ready in time"
+          docker logs ci-redis
+          exit 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
