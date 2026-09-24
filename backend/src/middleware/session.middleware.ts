@@ -19,14 +19,26 @@ export function requireSession(
     req.headers.cookie ?? null,
   );
 
-  if (!existingSession) {
-    throw new AppError(
-      "Session is required.",
-      HttpStatus.UNAUTHORIZED,
-      "SESSION_REQUIRED",
-    );
+  if (existingSession) {
+    req.sessionId = existingSession;
+    next();
+    return;
   }
 
-  req.sessionId = existingSession;
-  next();
+  /*
+   * First contact: the global sessionMiddleware already assigned a fresh
+   * sessionId and issued the Set-Cookie — but this request's Cookie header
+   * predates it. Trust the assigned session instead of rejecting the very
+   * first request of a new browser session.
+   */
+  if (req.sessionId) {
+    next();
+    return;
+  }
+
+  throw new AppError(
+    "Session is required.",
+    HttpStatus.UNAUTHORIZED,
+    "SESSION_REQUIRED",
+  );
 }

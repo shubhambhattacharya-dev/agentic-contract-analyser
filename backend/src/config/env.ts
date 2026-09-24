@@ -156,6 +156,20 @@ const InfraSchema = z.object({
   LANGFUSE_LOG_CONTENT: z
     .string()
     .optional(),
+
+  // Extra CORS origins for production (comma-separated), e.g. the deployed
+  // Vercel frontend URL. Development origins are always allowed.
+  ALLOWED_ORIGINS: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value
+        ? value
+            .split(",")
+            .map((origin) => origin.trim())
+            .filter(Boolean)
+        : [],
+    ),
 });
 
 // ─────────────────────────────────────────────────────────────

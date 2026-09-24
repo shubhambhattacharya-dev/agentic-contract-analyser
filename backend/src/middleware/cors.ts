@@ -7,6 +7,9 @@ import { env } from "../config/env.js";
 const PRODUCTION_ORIGINS: string[] = [
   "https://elcara.vercel.app",
   "https://elcara-git-main.vercel.app",
+  // Deployment-configured origins (comma-separated in ALLOWED_ORIGINS) —
+  // the Vercel production/preview URLs are not known ahead of time.
+  ...env.ALLOWED_ORIGINS,
 ];
 
 const DEVELOPMENT_ORIGINS: string[] = [

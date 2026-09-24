@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Body fallback colors driven by the theme class (tokens kept minimal). */
+body {
+  @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+}
+
+/* Thin, theme-aware scrollbars for the workspace panes. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: theme("colors.slate.300") transparent;
+}
+
+.dark * {
+  scrollbar-color: theme("colors.slate.700") transparent;
+}
