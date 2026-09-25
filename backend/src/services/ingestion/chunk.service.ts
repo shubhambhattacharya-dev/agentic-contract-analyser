@@ -415,40 +415,61 @@ function buildChildChunks(
     }
   }
 
+  /*
+   * End offset of each word (first whitespace at/after its start).
+   *
+   * Sizing MUST use the actual span (start of the first word → end of the
+   * last word), because the slice keeps the ORIGINAL whitespace — newlines
+   * and column-layout space runs can make the real text far longer than the
+   * words joined with single spaces. Estimating from joined words was the
+   * bug that produced oversized children on real PDFs.
+   */
+  const wordEnds = wordOffsets.map((start) => {
+    let end = start;
+
+    while (
+      end < parent.text.length &&
+      !/\s/u.test(parent.text[end] ?? "")
+    ) {
+      end += 1;
+    }
+
+    return end;
+  });
+
   const children: DocumentChunk[] = [];
 
   let startWordIndex = 0;
   let childNumber = 1;
 
   while (startWordIndex < words.length) {
-    const selectedWords: string[] = [];
     let endWordIndex = startWordIndex;
+    let selectedCount = 0;
 
     while (endWordIndex < words.length) {
-      const word = words[endWordIndex];
+      const spanStart = wordOffsets[startWordIndex];
+      const spanEnd = wordEnds[endWordIndex];
 
-      if (!word) {
+      if (spanStart === undefined || spanEnd === undefined) {
         break;
       }
 
-      const candidate =
-        selectedWords.length === 0
-          ? word
-          : `${selectedWords.join(" ")} ${word}`;
+      const spanEstimate = estimateTokens(
+        parent.text.slice(spanStart, spanEnd),
+      );
 
       if (
-        selectedWords.length > 0 &&
-        estimateTokens(candidate) >
-          CHILD_MAX_TOKENS
+        selectedCount > 0 &&
+        spanEstimate > CHILD_MAX_TOKENS
       ) {
         break;
       }
 
-      selectedWords.push(word);
+      selectedCount += 1;
       endWordIndex += 1;
     }
 
-    if (selectedWords.length === 0) {
+    if (selectedCount === 0) {
       throw new DocumentChunkingError(
         `Unable to create child chunk for ${parent.id}.`,
       );
@@ -460,15 +481,12 @@ function buildChildChunks(
     const lastWordIndex =
       endWordIndex - 1;
 
-    const lastWord = words[lastWordIndex];
-
-    const lastWordOffset =
-      wordOffsets[lastWordIndex];
+    const lastWordEnd =
+      wordEnds[lastWordIndex];
 
     if (
       firstWordOffset === undefined ||
-      lastWord === undefined ||
-      lastWordOffset === undefined
+      lastWordEnd === undefined
     ) {
       throw new DocumentChunkingError(
         `Unable to calculate offsets for ${parent.id}.`,
@@ -476,8 +494,7 @@ function buildChildChunks(
     }
 
     const localStart = firstWordOffset;
-    const localEnd =
-      lastWordOffset + lastWord.length;
+    const localEnd = lastWordEnd;
 
     const childText = parent.text.slice(
       localStart,
@@ -505,11 +522,13 @@ function buildChildChunks(
       break;
     }
 
-    const overlapWordCount =
-      calculateOverlapWordCount(
-        selectedWords,
-        tokenEstimate,
-      );
+    const overlapWordCount = Math.max(
+      1,
+      Math.ceil(
+        CHILD_OVERLAP_TOKENS /
+          Math.max(tokenEstimate / selectedCount, 1),
+      ),
+    );
 
     startWordIndex = Math.max(
       startWordIndex + 1,
