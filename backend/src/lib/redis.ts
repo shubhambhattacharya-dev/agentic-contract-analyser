@@ -9,6 +9,10 @@ export const redis = new Redis({
   password: env.REDIS_PASSWORD,
   maxRetriesPerRequest: 3,
   enableReadyCheck: true,
+  // In production the app uses Upstash REST; the local ioredis client must
+  // never dial out (it would spam ECONNREFUSED against a nonexistent local
+  // Redis). lazyConnect defers the connection until a command actually runs.
+  lazyConnect: env.NODE_ENV === "production",
 });
 
 redis.on("connect", () => {
