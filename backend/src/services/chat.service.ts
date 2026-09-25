@@ -185,11 +185,7 @@ export async function* chatService(
        * and the quote verifier remains the final guard against fabrication.
        */
       if (!agentFinished && agentObservations.length === 0) {
-        yield* abstain(
-          sessionId,
-          conversationId,
-          request,
-        );
+        yield* abstain(sessionId, conversationId, request, decision.kind);
 
         return;
       }
@@ -201,6 +197,9 @@ export async function* chatService(
         sessionId,
         conversationId,
         request,
+        decision.kind === "abstain" && "reason" in decision
+          ? decision.reason
+          : "No matching passage was retrieved.",
       );
 
       return;
@@ -458,12 +457,23 @@ async function* abstain(
   sessionId: string,
   conversationId: string,
   request: ChatRequest,
+  reason?: string,
 ): AsyncGenerator<ChatEvent> {
+  /*
+   * The refusal must be self-explanatory: the transparency line states what
+   * was searched and why nothing was answered, so it survives into the
+   * persisted message instead of only living in a transient SSE event.
+   */
+  const coverage =
+    reason === "No relevant evidence was retrieved."
+      ? "No passage in the selected document(s) matched this question — the words you asked about do not appear in the indexed text."
+      : (reason ??
+        "Retrieved evidence was too weak to answer reliably.");
+
   const message: ChatMessage = {
     id: randomUUID(),
     role: "assistant",
-    content:
-      "I could not find sufficient evidence in the selected document(s) to answer this question.",
+    content: `I could not find sufficient evidence in the selected document(s) to answer this question. ${coverage}`,
     createdAt: new Date().toISOString(),
     sources: [],
   };
@@ -479,7 +489,7 @@ async function* abstain(
   yield {
     type: "notice",
     kind: "coverage",
-    text: "No passage in the selected document(s) matched this question.",
+    text: coverage,
   };
 
   yield {
