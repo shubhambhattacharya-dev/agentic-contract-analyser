@@ -68,7 +68,11 @@ export function Sidebar(props: {
         className="flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-60"
       >
         {props.uploading ? <Spinner className="border-white/40 border-t-white" /> : "+"}
-        {props.uploading ? `Uploading ${props.uploadPercent}%` : "Upload Document"}
+        {props.uploading
+          ? props.uploadPercent >= 100
+            ? "Processing…"
+            : `Uploading ${props.uploadPercent}%`
+          : "Upload Document"}
       </button>
 
       {props.uploadError ? (
