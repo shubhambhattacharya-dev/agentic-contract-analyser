@@ -48,6 +48,48 @@ export function extractSectionNumber(text: string): string | null {
   return match?.[1] ?? null;
 }
 
+/** Removes a leading section number so renumbering isn't mistaken for substance. */
+export function stripSectionNumber(text: string): string {
+  return text.replace(SECTION_NUMBER_PATTERN, "");
+}
+
+/**
+ * Derives clause-level segments from parent chunks by splitting at embedded
+ * section-number boundaries. Parent chunks may span several clauses (short
+ * clauses merge during chunking), which would otherwise make clause-level
+ * comparison miss changes. Unnumbered documents compare as whole parents.
+ */
+export function deriveClauses(parents: SectionInput[]): SectionInput[] {
+  const out: SectionInput[] = [];
+
+  for (const parent of parents) {
+    const matches = [
+      ...parent.text.matchAll(/(?:^|\n)\s*(\d+(?:\.\d+)*)[.)]?\s+/gu),
+    ];
+
+    if (matches.length === 0) {
+      out.push(parent);
+      continue;
+    }
+
+    matches.forEach((match, index) => {
+      const start = match.index ?? 0;
+      const end =
+        index + 1 < matches.length
+          ? (matches[index + 1]!.index ?? parent.text.length)
+          : parent.text.length;
+
+      const segment = parent.text.slice(start, end).trim();
+
+      if (segment.length > 20) {
+        out.push({ id: `${parent.id}-c${index + 1}`, text: segment });
+      }
+    });
+  }
+
+  return out;
+}
+
 export function sectionLabel(text: string): string {
   const clean = text.replace(/\s+/gu, " ").trim();
   const words = clean.split(" ").slice(0, 8).join(" ");
@@ -122,14 +164,15 @@ export function classifyChange(
     return "CRITICAL";
   }
 
-  const normalizedA = normalizeText(textA);
-  const normalizedB = normalizeText(textB);
+  // Section renumbering alone is not a substantive change.
+  const normalizedA = normalizeText(stripSectionNumber(textA));
+  const normalizedB = normalizeText(stripSectionNumber(textB));
 
   if (normalizedA === normalizedB) {
     return "MINOR";
   }
 
-  if (numericChange(textA, textB)) {
+  if (numericChange(normalizedA, normalizedB)) {
     return "CRITICAL";
   }
 
@@ -190,6 +233,15 @@ export function alignSections(
     const sectionB = byNumberB.get(number);
 
     if (sectionB) {
+      /*
+       * Renumbering guard: a same-number pair that is lexically unrelated
+       * (documents renumbered clauses after insertions/removals) must NOT
+       * be forced together — release both for similarity-based matching.
+       */
+      if (jaccardSimilarity(sectionA.text, sectionB.text) < 0.15) {
+        continue;
+      }
+
       pairs.push({
         textA: sectionA.text,
         textB: sectionB.text,
@@ -372,7 +424,11 @@ export async function compareDocuments(options: {
     );
   }
 
-  const aligned = alignSections(parentsA, parentsB);
+  // Compare at CLAUSE level: parents can span several short clauses.
+  const sectionsA = deriveClauses(parentsA);
+  const sectionsB = deriveClauses(parentsB);
+
+  const aligned = alignSections(sectionsA, sectionsB);
 
   const changes: ComparisonChange[] = [];
 
@@ -380,7 +436,11 @@ export async function compareDocuments(options: {
     const kind: ChangeKind =
       pair.textA === null ? "added" : pair.textB === null ? "removed" : "changed";
 
-    if (kind === "changed" && normalizeText(pair.textA!) === normalizeText(pair.textB!)) {
+    if (
+      kind === "changed" &&
+      normalizeText(stripSectionNumber(pair.textA!)) ===
+        normalizeText(stripSectionNumber(pair.textB!))
+    ) {
       continue;
     }
 
