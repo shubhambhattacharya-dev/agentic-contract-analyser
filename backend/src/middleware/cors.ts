@@ -30,16 +30,13 @@ function validateOrigin(
   ) => void,
 ): void {
   if (!origin) {
-    if (env.NODE_ENV === "production") {
-      callback(
-        new Error(
-          "Requests without an Origin header are not allowed in production.",
-        ),
-      );
-    } else {
-      callback(null, true);
-    }
-
+    /*
+     * No Origin header = not a cross-site browser request (curl, health
+     * probes, direct navigations, server-to-server). Modern browsers always
+     * attach Origin to state-changing cross-site requests, so CSRF surface
+     * is unchanged — allow these through.
+     */
+    callback(null, true);
     return;
   }
 
