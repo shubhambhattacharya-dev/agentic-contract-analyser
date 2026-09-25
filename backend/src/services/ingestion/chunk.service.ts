@@ -377,15 +377,43 @@ function calculateOverlapWordCount(
 function buildChildChunks(
   parent: DocumentChunk,
 ): DocumentChunk[] {
-  const words = splitWords(parent.text);
+  const rawWords = splitWords(parent.text);
 
-  if (words.length === 0) {
+  if (rawWords.length === 0) {
     return [];
   }
 
-  const wordOffsets = findWordStartOffsets(
+  const rawOffsets = findWordStartOffsets(
     parent.text,
   );
+
+  /*
+   * A single "word" longer than CHILD_MAX_TOKENS (base64 blobs, URLs without
+   * separators, corrupted glyphs) would otherwise become an oversized child
+   * and fail validation. Split such tokens at character boundaries — the
+   * slices remain exact substrings, so canonical offsets stay true.
+   */
+  const maxWordChars =
+    CHILD_MAX_TOKENS * CHARS_PER_TOKEN;
+
+  const words: string[] = [];
+  const wordOffsets: number[] = [];
+
+  for (let index = 0; index < rawWords.length; index += 1) {
+    const word = rawWords[index]!;
+    const wordStart = rawOffsets[index]!;
+
+    if (word.length <= maxWordChars) {
+      words.push(word);
+      wordOffsets.push(wordStart);
+      continue;
+    }
+
+    for (let slice = 0; slice < word.length; slice += maxWordChars) {
+      words.push(word.slice(slice, slice + maxWordChars));
+      wordOffsets.push(wordStart + slice);
+    }
+  }
 
   const children: DocumentChunk[] = [];
 

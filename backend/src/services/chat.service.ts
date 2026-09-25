@@ -107,6 +107,38 @@ export async function* chatService(
       return;
     }
 
+    // 1b. Consistency pre-check: every selected document must still exist
+    // with its indexed chunks. A document whose record survived but whose
+    // index is gone (partial cleanup, storage reset) must fail with a
+    // useful, actionable message — never a raw internal error.
+    const availability = await Promise.all(
+      request.documentIds.map(async (documentId) => ({
+        documentId,
+        chunks: await store.get(
+          `elcara:sess:${sessionId}:doc:${documentId}:chunks`,
+        ),
+      })),
+    );
+
+    const missing = availability
+      .filter((entry) => !entry.chunks)
+      .map((entry) => entry.documentId);
+
+    if (missing.length > 0) {
+      logger.warn(
+        { sessionId, missing },
+        "Chat rejected: selected document(s) have no indexed chunks.",
+      );
+
+      yield {
+        type: "error",
+        message:
+          "One or more selected documents are no longer indexed (they may have been removed during maintenance). Please refresh your library and re-upload them.",
+      };
+
+      return;
+    }
+
     // 2. Retrieve evidence across all selected documents.
     const retrieval = await hybridRetrieve({
       sessionId,

@@ -108,6 +108,10 @@ export async function ingestDocument(
     ["ingestion"],
   );
 
+  // Tracked so a failure after the file was stored can clean it up —
+  // a failed ingestion must not leave an unreachable blob behind.
+  let storedFileUrl: string | null = null;
+
   try {
     // 1. Persist the raw binary through the storage abstraction.
     const storeSpan = obsTrace.span("store-file");
@@ -118,6 +122,8 @@ export async function ingestDocument(
       mimetype: input.mimeType,
       size: input.size,
     });
+
+    storedFileUrl = uploaded.url;
 
     storeSpan.end({ pathname: uploaded.pathname, sizeBytes: input.size });
 
@@ -308,6 +314,18 @@ export async function ingestDocument(
       { documentId },
       error instanceof Error ? error.message : "Ingestion failed",
     );
+
+    // Ghost-file cleanup: the raw binary must not outlive a failed ingestion.
+    if (storedFileUrl) {
+      try {
+        await store.deleteFile(storedFileUrl);
+      } catch (cleanupError) {
+        logger.warn(
+          { cleanupError, documentId },
+          "Failed to clean up stored file after ingestion failure.",
+        );
+      }
+    }
 
     if (error instanceof AppError) {
       throw error;
