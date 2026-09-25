@@ -8,6 +8,7 @@ import {
 } from "../../middleware/error-handler.js";
 import { keys, store, TTL } from "../../lib/store.js";
 import { startTrace } from "../../lib/observability.js";
+import { EmbeddingError } from "../retrieval/embedding.service.js";
 import {
   type ExtractedDocument,
   type SupportedDocumentMimeType,
@@ -196,15 +197,43 @@ export async function ingestDocument(
     bm25Span.end({ documents: chunks.all.length });
 
     // 6. Embeddings for child chunks, persisted with model metadata.
+    //
+    // Resilience: if the embedding provider is rate-limited or down, the
+    // document is still ingested in BM25-only mode (lexical retrieval fully
+    // works; dense retrieval is disabled for this document) instead of
+    // failing the upload. A document the user can search beats a 500.
     const embedSpan = obsTrace.span("embed");
 
-    const embeddings = await embedChunks(chunks.all, {
-      batchSize: env.EMBED_BATCH_SIZE,
-    });
+    let embeddings: Awaited<ReturnType<typeof embedChunks>> | null = null;
+    let embeddingsMode: "dense" | "bm25-only" = "dense";
+
+    try {
+      embeddings = await embedChunks(chunks.all, {
+        batchSize: env.EMBED_BATCH_SIZE,
+      });
+    } catch (error) {
+      if (error instanceof EmbeddingError) {
+        embeddingsMode = "bm25-only";
+
+        logger.warn(
+          { documentId, error: error.message },
+          "Embedding unavailable — ingesting in BM25-only mode.",
+        );
+
+        embeddings = {
+          embeddings: [],
+          model: "unavailable",
+          dimensions: 0,
+        };
+      } else {
+        throw error;
+      }
+    }
 
     embedSpan.end({
       vectors: embeddings.embeddings.length,
       model: embeddings.model,
+      mode: embeddingsMode,
     });
 
     await saveEmbeddings(sessionId, documentId, embeddings, {
