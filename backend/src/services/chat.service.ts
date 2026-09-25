@@ -413,6 +413,28 @@ export async function* chatService(
     }
 
     // 11. Build final assistant message (parsed answer text when available).
+    //
+    // Blank-answer guard: a model can return an empty or unusable response
+    // (e.g. refusing an off-topic question by outputting nothing). A blank
+    // bubble is never acceptable — fall back to the honest refusal.
+    const answerContent = (extracted.answer ?? generatedText).trim();
+
+    if (!answerContent && verifiedSources.length === 0) {
+      logger.warn(
+        { sessionId, conversationId },
+        "Model returned no usable answer content — abstaining.",
+      );
+
+      yield* abstain(
+        sessionId,
+        conversationId,
+        request,
+        "The question did not match anything in the selected document(s).",
+      );
+
+      return;
+    }
+
     const message: ChatMessage = {
       id: randomUUID(),
       role: "assistant",
