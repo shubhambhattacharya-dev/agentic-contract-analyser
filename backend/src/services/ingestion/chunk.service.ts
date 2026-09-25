@@ -416,26 +416,20 @@ function buildChildChunks(
   }
 
   /*
-   * End offset of each word (first whitespace at/after its start).
+   * End offset of each word.
    *
    * Sizing MUST use the actual span (start of the first word → end of the
    * last word), because the slice keeps the ORIGINAL whitespace — newlines
    * and column-layout space runs can make the real text far longer than the
    * words joined with single spaces. Estimating from joined words was the
    * bug that produced oversized children on real PDFs.
+   *
+   * Sub-words (from the oversized-token split above) are exact slices with
+   * no internal whitespace, so end = start + length is exact for all of them.
    */
-  const wordEnds = wordOffsets.map((start) => {
-    let end = start;
-
-    while (
-      end < parent.text.length &&
-      !/\s/u.test(parent.text[end] ?? "")
-    ) {
-      end += 1;
-    }
-
-    return end;
-  });
+  const wordEnds = words.map(
+    (word, index) => (wordOffsets[index] ?? 0) + word.length,
+  );
 
   const children: DocumentChunk[] = [];
 
@@ -608,7 +602,7 @@ function validateChunkRelationships(
       CHILD_MAX_TOKENS
     ) {
       throw new DocumentChunkingError(
-        `Child ${child.id} exceeds ${CHILD_MAX_TOKENS} estimated tokens.`,
+        `Child ${child.id} exceeds ${CHILD_MAX_TOKENS} estimated tokens (got ${child.tokenEstimate}, text length ${child.text.length}).`,
       );
     }
   }
