@@ -3,137 +3,123 @@
 Upload a legal contract (PDF or DOCX), ask questions about it in a chat, and get
 answers backed by **verified quotes**: every quote is located in the canonical
 document text by deterministic code before it is shown — invented or
-paraphrased quotes are never presented as genuine.
+paraphrased quotes are never presented as genuine. Clicking a citation opens
+the document at the exact verified passage, highlighted.
+
+![Chat with verified citations](frontend/public/screenshots/2-chat-verified-citation.png)
+
+## Features (all implemented and tested)
+
+- **PDF / DOCX upload** — clear rejection of other types; scanned (text-less)
+  PDFs are refused with a 422 and nothing is saved
+- **Document library** — list, open, delete (deletes indexes + chats too),
+  per-session isolation, processing status
+- **Grounded chat** — retrieval → evidence gate → (agent) → generation →
+  verification, streamed over SSE token-by-token
+- **Stop generation** — partial answer is kept and marked *stopped*
+- **Verified quotes** — whitespace-tolerant matching, canonical offsets, page
+  attribution, occurrence counts; rejected quotes emit a visible notice and
+  are never shown as genuine
+- **Citation highlighting** — click a citation → the viewer scrolls to and
+  highlights the exact verified passage (page-correct, cross-page capable)
+- **Multi-document questions** — select up to 5 documents; every quote is
+  labelled and verified against its own document
+- **Document comparison** — clause-level alignment (section-number + similarity
+  fallback), numeric-aware severity (a cap moving 100,000 → 1,000,000 is
+  CRITICAL even when wording is identical), grounded plain-language summaries,
+  filter by change kind
+- **Agentic research (Part C, Option 2)** — `search_document`, `get_section`,
+  `list_clauses` through a trusted executor; hard 4-round cap; malformed or
+  invented tool calls handled without crashing; live `agent_step` events
+- **Conversation history** — per document-selection, reopenable, capped
+- **Dark mode**, loading/empty/error states, responsive layout
 
 ## Architecture
 
 ```
-backend/   Express 5 + TypeScript (strict) API server
-  src/
-    config/          Zod-validated environment (env.ts)
-    routes/          upload, documents, chat (SSE), health
-    controllers/     HTTP boundary — no business logic
-    services/
-      ingestion/     extract (pdf-parse/mammoth) → structure → offset-true chunks
-      retrieval/     BM25 + Gemini embeddings + RRF fusion + evidence gate
-      ai/            provider abstraction (Groq/Gemini + fallback), agent loop,
-                     tool registry, trusted tool executor
-      verification/  whitespace-tolerant quote verifier (pure, deterministic)
-    lib/             Redis/Blob storage gateway (dev: ioredis + local FS,
-                     prod: Upstash REST + Vercel Blob)
-data/ public/ docs/ scripts/ fixtures/   (reserved; see "What is not finished")
+frontend/  Next.js 14 (App Router) + Tailwind — Vercel
+  src/lib/       typed API client, SSE parser, highlight math (pure, tested)
+  src/hooks/     chat state machine (abort-safe), theme
+  src/components/ sidebar, library, chat, viewer, sections, metadata, compare
+backend/   Express 5 + TypeScript (strict) API server — Render
+  services/
+    ingestion/     extract (pdf-parse/mammoth) → structure → offset-true chunks
+    retrieval/     BM25 + Gemini embeddings + RRF fusion + evidence gate
+    ai/            provider abstraction (Groq/Gemini + fallback), agent loop,
+                   tool registry, trusted tool executor
+    verification/  whitespace-tolerant quote verifier (pure, deterministic)
+    comparison/    clause alignment, severity classification, summaries
+  lib/             Redis/Blob storage gateway (dev: ioredis + local FS,
+                   prod: Upstash REST + Vercel Blob) + Langfuse tracing
 ```
 
-Key design law: **the LLM proposes; deterministic code disposes.** Model output
-is untrusted end to end — quotes are verified against the canonical text,
+**Design law: the LLM proposes; deterministic code disposes.** Model output is
+untrusted end to end — quotes are verified against the canonical text,
 offsets/pages are computed by the verifier (never read from the model), and
 tool calls execute through a server-side executor that injects the session and
-document scope (the model can widen neither).
+document scope.
 
 ## Running locally
 
 ```bash
-# 1. Redis (host port 6380 — see note in docker-compose.yml)
-docker compose up -d redis langfuse   # redis required; langfuse optional
+# Redis (host port 6380 — see note in docker-compose.yml)
+docker compose up -d redis
 
-# 2. Backend
+# Backend
 cd backend
-cp ../.env.example .env      # fill GROQ_API_KEY + GOOGLE_GENERATIVE_AI_API_KEY
-npm ci
-npm run dev                  # http://localhost:8000
+cp ../.env.example .env     # fill GROQ_API_KEY + GOOGLE_GENERATIVE_AI_API_KEY
+npm ci && npm run dev       # http://localhost:8000
+
+# Frontend (separate terminal)
+cd frontend
+npm ci && npm run dev       # http://localhost:3000 (proxies /api to :8000)
 
 # Checks
-npm run typecheck && npm test && npm run build
+cd backend  && npm run typecheck && npm test && npm run build
+cd frontend && npm run typecheck && npm test && npm run build
 ```
 
-Environment variables are validated at boot (Zod): provider keys, models,
-model routing (`GENERATION_PROVIDER`, `GENERATION_FALLBACK_CHAIN`), Redis,
-Blob, and retrieval limits (`MAX_AGENT_ROUNDS` hard-capped at 4).
+All environment variables are validated at boot (Zod) — see `.env.example`.
+Optional Langfuse LLM tracing: set `LANGFUSE_BASE_URL`/`PUBLIC_KEY`/`SECRET_KEY`
+(cloud or `docker compose up -d langfuse`); disabled by default and
+fail-safe, with `LANGFUSE_LOG_CONTENT=true` opted-in for raw prompts.
 
-## LLM observability (Langfuse)
+## Deployment
 
-Every LLM surface is traced to a self-configurable Langfuse project (cloud or
-the bundled local stack via `docker compose up -d langfuse` →
-`http://localhost:3001`):
+- **Backend → Render**: Blueprint from `render.yaml` (build `npm ci && npm run build`, start `node dist/index.js`, health `/health`). Env: `NODE_ENV=production`, Upstash Redis REST credentials, Vercel Blob token, provider keys, `ALLOWED_ORIGINS=https://<your-vercel-url>`.
+- **Frontend → Vercel**: root directory `frontend`, env `NEXT_PUBLIC_API_URL=https://<render-app>.onrender.com`.
+- Cookies are `SameSite=None; Secure` in production for the cross-origin flow; CORS is origin-restricted via `ALLOWED_ORIGINS`.
 
-- `ingestion` trace — store-file / extract / chunk / bm25 / embed spans with
-  counts and durations.
-- `embedding` trace — one `embed-batch` generation per batch (batch API: up to
-  100 inputs per provider call), plus total duration.
-- `chat` trace — retrieval span (chunk count, gate decision), agent span when
-  the gate escalates, and closing metadata: verified/rejected quote counts,
-  gate decision, end-to-end duration.
-- `agent-research` trace — one span per tool call (name, args, ok, latency),
-  with trace-end reason (finished / hard-cap / malformed / aborted).
-- `ai-generation` trace — every generation and stream: provider, model,
-  first-token latency, stream size, fallback attempts, errors.
+## Part C — Option 2: agentic document research
 
-Configure in `backend/.env`: `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`,
-`LANGFUSE_SECRET_KEY`. Tracing is fully optional and fail-safe — with keys
-unset the app behaves identically and logs a single "tracing disabled" line.
-By default **no contract text leaves the machine**: only sizes, latencies and
-metadata are recorded. Set `LANGFUSE_LOG_CONTENT=true` to also record raw
-prompts/completions.
+Weak retrieval evidence escalates to a ReAct-style research loop. The model
+chooses one action per round from `search_document` / `get_section` /
+`list_clauses`; every call is validated (name, arguments, trusted session and
+document scope injected server-side) and streamed to the UI as an
+`agent_step` event. The loop hard-stops at 4 rounds, and the final answer —
+whether from direct retrieval or the agent — passes through the same quote
+verifier, so the agent cannot bypass grounding.
 
-## API
+## Testing
 
-| Route | Method | Purpose |
-| --- | --- | --- |
-| `/api/upload` | POST | multipart upload → extract → chunk → BM25 → embeddings → persist (422 on scanned/unreadable) |
-| `/api/documents` | GET | library for the session cookie |
-| `/api/documents/:docId` | GET / DELETE | open one document / delete it (cascades to indexes + chats) |
-| `/api/documents/:docId/status` | GET | processing status |
-| `/api/chat` | POST | SSE stream: retrieval → gate → (agent ≤ 4 rounds) → generation → quote verification → persistence |
-| `/api/chat/conversations` | GET | list conversations |
-| `/api/chat/conversations/:id` | GET | reopen one conversation |
-| `/api/compare` | POST | clause-level comparison: section-number alignment, numeric-aware severity (CRITICAL/MODERATE/MINOR), grounded plain-language summaries |
-| `/health` | GET | liveness + Redis latency |
+- Backend: **285 tests** (unit + integration) — chunker invariants and
+  hardening (structured text, oversized tokens), BM25, stores, retrieval,
+  verifier red-team cases, agent-loop safety, comparison, upload seam,
+  library, deletion cleanup, session isolation, ghost-document protection.
+- Frontend: **17 tests** — SSE parsing, highlight math, upload validation.
+- CI: GitHub Actions — secret scan → backend (typecheck, tests, build against
+  a live Redis) → frontend (typecheck, tests, build).
+- Lint: not configured (not claimed).
 
-SSE events: `token`, `agent_step`, `quote_verified`, `quote_rejected`,
-`notice`, `done` (`stopped` flag), `error`.
+## Known limitations
 
-## What is finished
-
-- PDF/DOCX ingestion with offset-true parent/child chunks; per-page mapping;
-  scanned-PDF rejection (nothing saved, clear 422 message).
-- Session-scoped document library (list / open / delete with full cleanup,
-  including chats) with cross-session isolation tests.
-- Hybrid retrieval (BM25 + dense, RRF-fused) across multiple documents with a
-  single query embedding per request.
-- Evidence gate (sufficient / agentic / abstain) on RRF-scale floors.
-- Part C Option 2 agentic loop: `search_document`, `get_section`,
-  `list_clauses`; hard 4-round cap; malformed/unknown tool calls handled
-  without crashing; every tool call streamed as an `agent_step` event.
-- SSE chat with streaming tokens; stop mid-answer keeps the partial and marks
-  it `stopped`; per-selection conversation history, capped at 50 messages.
-- Whitespace-tolerant quote verification with canonical offset mapping, page
-  derivation, and occurrence counts; rejected quotes emit `quote_rejected`
-  and are never rendered as genuine. Verified live end-to-end: a page-140
-  clause of a 150-page contract answers with the correct page attribution.
-- Clause-level document comparison: alignment by section number with
-  token-overlap fallback, numeric-change detection (a moved liability cap is
-  CRITICAL even when wording is identical), severity filter/sort, grounded
-  one-line summaries per change. One-change demo yields exactly one CRITICAL.
-- 277 passing tests (unit + integration) covering the chunker invariants,
-  BM25, stores, retrieval, the verifier (document-level red-team cases),
-  the agent loop (hard cap, unknown tools, malformed calls, argument
-  validation, abort), comparison alignment/classification, upload seam,
-  library, deletion cleanup, and session isolation. CI runs secret scan →
-  typecheck → tests → build.
-
-## What is not finished
-
-- **No frontend.** The `frontend/` directory is empty — there is no UI for
-  upload, library, chat, or citation highlighting. All features above are
-  API-only for now.
-- **No citation highlighting (Part B #5) end-to-end.** The backend emits
-  verified `startOffset`/`endOffset`/`page` per quote, but there is no viewer
-  to scroll and highlight.
-- **No deployment.** The app runs locally; there is no live URL yet.
-- 150-page verification is partial: full ingestion with real embeddings is
-  rate-limit-gated on the free Gemini tier; the page-140 test ran with
-  BM25-only retrieval (embeddings mocked empty) through the real gate,
-  agent, generation, and verifier.
-- Gate thresholds are scale-corrected but not yet calibrated against the
-  golden-question fixture set (Guidebook §13.3).
-- No demo video, note, or screenshots yet.
+- Ingestion runs synchronously within the upload request; very large PDFs
+  (>100 pages) can take a minute to process and there is no resumable queue.
+- 150-page support is verified end-to-end with BM25-only retrieval (embeddings
+  mocked) — the real-embedding run is gated on the free Gemini tier's daily
+  quota; chunk/page/verify pipeline is identical either way.
+- Gate thresholds are scale-corrected but not calibrated against a golden
+  fixture set (procedure documented in the Build Guidebook §13.3).
+- Quote verification is deliberately strict: heavily paraphrased "quotes" are
+  rejected, so an answer may occasionally carry fewer citations than the model
+  proposed — by design.

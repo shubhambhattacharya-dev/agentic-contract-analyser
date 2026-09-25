@@ -128,3 +128,39 @@ describe("chat consistency (ghost document protection)", () => {
     expect(res.text).toContain("no longer indexed");
   });
 });
+
+describe("blank-answer guard", () => {
+  beforeEach(async () => {
+    await redis.flushdb();
+  });
+
+  it("never stores an empty assistant message — falls back to the honest refusal", async () => {
+    // providerService.stream is mocked at module level; override it to yield
+    // nothing (model returned an empty response for an off-topic question).
+    const { providerService } = await import("../../src/services/ai/provider.service.js");
+    const original = providerService.stream;
+    (providerService as { stream: unknown }).stream = async function* () {
+      yield "   ";
+    };
+
+    const upload = await request(app)
+      .post("/api/upload")
+      .attach("file", Buffer.from("%PDF-1.7 mock"), {
+        filename: "blank.pdf",
+        contentType: "application/pdf",
+      });
+    const cookie = upload.headers["set-cookie"].map(String).join("; ").split(";")[0];
+
+    const res = await request(app)
+      .post("/api/chat")
+      .set("Cookie", cookie)
+      .send({ documentIds: [upload.body.document.documentId], message: "who is sharukh khan ?" });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('"type":"done"');
+    expect(res.text).toContain("could not find sufficient evidence");
+    expect(res.text).not.toContain('"content":""');
+
+    (providerService as { stream: unknown }).stream = original;
+  });
+});
