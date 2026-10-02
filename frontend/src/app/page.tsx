@@ -8,6 +8,7 @@ import {
   api,
   ApiError,
   uploadDocument as uploadDocumentApi,
+  waitForDocument,
   type CitedSource,
   type ConversationSummary,
   type DocumentMeta,
@@ -106,7 +107,12 @@ export default function Page() {
       setUploadPercent(0);
 
       try {
+        // The upload resolves with 202 once the file is stored and the
+        // document is queued; ingestion then finishes server-side. Poll the
+        // status endpoint so the "Processing…" phase covers the queue.
         const { document } = await uploadDocumentApi(file, setUploadPercent);
+
+        await waitForDocument(document.documentId);
 
         await refreshLibrary();
         setSelectedIds((previous) =>
@@ -121,6 +127,7 @@ export default function Page() {
         setUploadError(
           cause instanceof ApiError ? cause.message : "Upload failed.",
         );
+        await refreshLibrary();
       } finally {
         setUploading(false);
       }

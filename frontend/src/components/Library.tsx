@@ -93,7 +93,15 @@ export function Library(props: {
                 </span>
               </button>
 
-              <StatusChip status="ready" />
+              {/* Documents appear in the library as soon as they are queued;
+                  the chip reflects the background pipeline until it commits. */}
+              <StatusChip
+                status={
+                  document.status === "ready" || !document.status
+                    ? "ready"
+                    : "processing"
+                }
+              />
 
               <button
                 type="button"

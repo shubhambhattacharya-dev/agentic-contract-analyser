@@ -6,14 +6,20 @@ import type {
 
 import { logger } from "../lib/logger.js";
 import { HttpStatus } from "../middleware/error-handler.js";
-import { ingestDocument } from "../services/ingestion/ingest.service.js";
+import { queueDocument } from "../services/ingestion/ingest.service.js";
+import { ingestQueue } from "../services/ingestion/queue.service.js";
 import type { SupportedDocumentMimeType } from "../types/document.types.js";
 
 /**
- * POST /api/upload - the full ingestion seam:
- * upload -> extract -> structure -> chunk -> BM25 -> embeddings -> persist.
- * Returns 201 with the document record, or 422 for scanned/unreadable files
- * (nothing is saved in that case - the library stays clean).
+ * POST /api/upload — accepts the file, stores it, creates the library entry,
+ * and hands the heavy pipeline to the background queue.
+ *
+ * Returns 202 with the document record and status "queued"; the client polls
+ * GET /api/documents/:docId/status until "ready" or "failed". Validation
+ * rejections (missing file, wrong type, too large) still fail the request
+ * synchronously with 400. Scan/readability failures are detected during
+ * background processing and surface as status "failed" — the library is
+ * cleaned up either way.
  */
 export async function uploadDocumentController(
   req: Request,
@@ -36,7 +42,7 @@ export async function uploadDocumentController(
       return;
     }
 
-    const result = await ingestDocument({
+    const queued = await queueDocument({
       sessionId: req.sessionId,
       buffer: req.file.buffer,
       originalName: req.file.originalname,
@@ -45,20 +51,35 @@ export async function uploadDocumentController(
       size: req.file.size,
     });
 
-    res.status(HttpStatus.CREATED).json({
-      message: "Document uploaded and processed successfully.",
-      document: {
-        documentId: result.documentId,
-        originalName: result.originalName,
-        mimeType: result.mimeType,
-        size: req.file.size,
-        pageCount: result.pageCount,
-        charCount: result.charCount,
-        wordCount: result.wordCount,
-        parentChunkCount: result.parentChunkCount,
-        childChunkCount: result.childChunkCount,
+    ingestQueue.enqueue({
+      sessionId: req.sessionId,
+      documentId: queued.documentId,
+      buffer: req.file.buffer,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype as SupportedDocumentMimeType,
+      size: req.file.size,
+      fileUrl: queued.fileUrl,
+      filePathname: queued.filePathname,
+    });
+
+    logger.info(
+      {
+        requestId: req.requestId,
+        sessionId: req.sessionId,
+        documentId: queued.documentId,
       },
-      status: result.status,
+      "Upload accepted — ingestion queued.",
+    );
+
+    res.status(HttpStatus.ACCEPTED).json({
+      message: "Document accepted — processing continues in the background.",
+      document: {
+        documentId: queued.documentId,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+      },
+      status: "queued",
     });
   } catch (error) {
     next(error);

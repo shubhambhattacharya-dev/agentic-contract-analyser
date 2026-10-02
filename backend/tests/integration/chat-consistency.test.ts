@@ -43,6 +43,7 @@ vi.mock("../../src/services/ai/provider.service.js", () => ({
 import { app } from "../../src/app.js";
 import { redis } from "../../src/lib/redis.js";
 import { keys, store } from "../../src/lib/store.js";
+import { ingestQueue } from "../../src/services/ingestion/queue.service.js";
 
 async function uploadDoc(cookie?: string) {
   const req = request(app)
@@ -56,7 +57,11 @@ async function uploadDoc(cookie?: string) {
   if (cookie) req.set("Cookie", cookie);
 
   const res = await req;
-  expect(res.status).toBe(201);
+  expect(res.status).toBe(202);
+
+  // The upload enqueues background ingestion; wait for it to settle so the
+  // downstream assertions see the fully processed document.
+  await ingestQueue.idle();
 
   const sessionCookie =
     cookie ?? res.headers["set-cookie"].map(String).join("; ").split(";")[0];
@@ -149,6 +154,9 @@ describe("blank-answer guard", () => {
         filename: "blank.pdf",
         contentType: "application/pdf",
       });
+    expect(upload.status).toBe(202);
+    await ingestQueue.idle();
+
     const cookie = upload.headers["set-cookie"].map(String).join("; ").split(";")[0];
 
     const res = await request(app)

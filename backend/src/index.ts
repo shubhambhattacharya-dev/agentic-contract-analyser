@@ -2,6 +2,7 @@ import { env } from "./config/env.js";
 import { logger } from "./lib/logger.js";
 import { flushObservability } from "./lib/observability.js";
 import { wireProcessHandlers } from "./middleware/error-handler.js";
+import { recoverInterruptedIngestions } from "./services/ingestion/ingest.service.js";
 import { app } from "./app.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -37,6 +38,17 @@ server.on("error", (error: NodeJS.ErrnoException) => {
   }
 
   process.exit(1);
+});
+
+// The ingestion queue is in-memory, so documents stuck "queued"/"processing"
+// from a previous process can never finish — mark them failed and clean up
+// before traffic sees them. Runs after listen so a slow Redis scan cannot
+// delay startup; recovery of a handful of keys takes milliseconds anyway.
+void recoverInterruptedIngestions().catch((error) => {
+  logger.error(
+    { err: error },
+    "Boot recovery of interrupted ingestions failed.",
+  );
 });
 
 function shutdown(signal: string): void {

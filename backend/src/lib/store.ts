@@ -246,6 +246,155 @@ async function redisExpire(
   await localRedis.expire(key, ttlSec);
 }
 
+/**
+ * Atomic fixed-window counter for rate limiting: INCR, and on the first
+ * hit set the TTL so the window cleans itself up.
+ *
+ * Returns the count inside the current window (1 on the first hit).
+ */
+async function redisIncrWithTtl(
+  key: string,
+  ttlSec: number,
+): Promise<number> {
+  if (isProduction) {
+    const client = getProductionRedis();
+
+    const count = await client.incr(key);
+
+    if (count === 1) {
+      await client.expire(key, ttlSec);
+    }
+
+    return count;
+  }
+
+  const count = await localRedis.incr(key);
+
+  if (count === 1) {
+    await localRedis.expire(key, ttlSec);
+  }
+
+  return count;
+}
+
+/**
+ * KEYSPACE SCAN with MATCH — used by boot recovery to find documents whose
+ * background ingestion was interrupted by a restart. Scanning is bounded
+ * (maxPages) so a pathological keyspace can never hang startup.
+ */
+async function redisScanKeys(
+  pattern: string,
+  count = 100,
+  maxPages = 1000,
+): Promise<string[]> {
+  const found: string[] = [];
+
+  if (isProduction) {
+    const client = getProductionRedis();
+    let cursor = "0";
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const [next, keys] = await client.scan(cursor, {
+        match: pattern,
+        count,
+      });
+
+      found.push(...keys);
+      cursor = next;
+
+      if (cursor === "0") {
+        return found;
+      }
+    }
+
+    return found;
+  }
+
+  let cursor = "0";
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const [next, keys] = await localRedis.scan(
+      cursor,
+      "MATCH",
+      pattern,
+      "COUNT",
+      count,
+    );
+
+    found.push(...keys);
+    cursor = next;
+
+    if (cursor === "0") {
+      return found;
+    }
+  }
+
+  return found;
+}
+
+// ─── Index batch cleanup (BM25 + embeddings) ─────────────────────────────────
+
+/**
+ * Deletes the batched BM25 + embedding index data for one document.
+ *
+ * These live under their own meta/batch keys (a different prefix style from
+ * the document keys — see bm25-store.service.ts), so they are NOT covered by
+ * keys.allDocKeys. Used by deleteDocument and ingestion-failure cleanup.
+ */
+export async function deleteIndexBatches(
+  sid: string,
+  did: string,
+): Promise<void> {
+  try {
+    const bm25MetaKey = `${sid}:doc:${did}:bm25:meta`;
+    const bm25Meta = await store.get<{
+      generation: string;
+      batchCount: number;
+    }>(bm25MetaKey);
+
+    if (bm25Meta) {
+      const batchKeys = Array.from(
+        { length: bm25Meta.batchCount },
+        (_, index) =>
+          `${sid}:doc:${did}:bm25:batch:${bm25Meta.generation}:${index}`,
+      );
+      if (batchKeys.length > 0) {
+        await store.del(...batchKeys);
+      }
+      await store.del(bm25MetaKey);
+    }
+  } catch (err) {
+    logger.warn(
+      { err, sid, did },
+      "Failed to clean up BM25 index on document delete",
+    );
+  }
+
+  try {
+    const embMetaKey = `${sid}:doc:${did}:emb:meta`;
+    const embMeta = await store.get<{
+      batchCount: number;
+    }>(embMetaKey);
+
+    if (embMeta) {
+      const batchKeys = Array.from(
+        { length: embMeta.batchCount },
+        (_, index) =>
+          `${sid}:doc:${did}:emb:batch:${index}`,
+      );
+      if (batchKeys.length > 0) {
+        await store.del(...batchKeys);
+      }
+      await store.del(embMetaKey);
+    }
+  } catch (err) {
+    logger.warn(
+      { err, sid, did },
+      "Failed to clean up embeddings on document delete",
+    );
+  }
+}
+
 export const store = {
   /**
    * Persists a document binary through the storage abstraction.
@@ -320,7 +469,23 @@ export const store = {
     key: string,
     ttlSec: number,
   ): Promise<void> {
-    await redisExpire(key, ttlSec);
+    return redisExpire(key, ttlSec);
+  },
+
+  /** Fixed-window counter (rate limiting): INCR + TTL on first hit. */
+  async incrWithTtl(
+    key: string,
+    ttlSec: number,
+  ): Promise<number> {
+    return redisIncrWithTtl(key, ttlSec);
+  },
+
+  /** KEYSPACE SCAN with MATCH (bounded); boot recovery + ops tooling. */
+  async scanKeys(
+    pattern: string,
+    count = 100,
+  ): Promise<string[]> {
+    return redisScanKeys(pattern, count);
   },
 
   async hset<T>(
@@ -547,58 +712,10 @@ export const store = {
     );
     await store.del(...remainingKeys);
 
-    // 4. Remove BM25 data (meta + batches)
-    try {
-      const bm25MetaKey = `${sid}:doc:${did}:bm25:meta`;
-      const bm25Meta = await store.get<{
-        generation: string;
-        batchCount: number;
-      }>(bm25MetaKey);
+    // 4. Remove BM25 + embedding batch data.
+    await deleteIndexBatches(sid, did);
 
-      if (bm25Meta) {
-        const batchKeys = Array.from(
-          { length: bm25Meta.batchCount },
-          (_, index) =>
-            `${sid}:doc:${did}:bm25:batch:${bm25Meta.generation}:${index}`,
-        );
-        if (batchKeys.length > 0) {
-          await store.del(...batchKeys);
-        }
-        await store.del(bm25MetaKey);
-      }
-    } catch (err) {
-      logger.warn(
-        { err, sid, did },
-        "Failed to clean up BM25 index on document delete",
-      );
-    }
-
-    // 5. Remove embedding data (meta + batches)
-    try {
-      const embMetaKey = `${sid}:doc:${did}:emb:meta`;
-      const embMeta = await store.get<{
-        batchCount: number;
-      }>(embMetaKey);
-
-      if (embMeta) {
-        const batchKeys = Array.from(
-          { length: embMeta.batchCount },
-          (_, index) =>
-            `${sid}:doc:${did}:emb:batch:${index}`,
-        );
-        if (batchKeys.length > 0) {
-          await store.del(...batchKeys);
-        }
-        await store.del(embMetaKey);
-      }
-    } catch (err) {
-      logger.warn(
-        { err, sid, did },
-        "Failed to clean up embeddings on document delete",
-      );
-    }
-
-    // 6. Remove conversations that reference this document.
+    // 5. Remove conversations that reference this document.
     try {
       await store.deleteChatsForDocument(sid, did);
     } catch (err) {
@@ -608,7 +725,7 @@ export const store = {
       );
     }
 
-    // 7. Remove associated stored file if present
+    // 6. Remove associated stored file if present
     const fileUrl = meta?.fileUrl;
     if (fileUrl) {
       await store.deleteFile(fileUrl);

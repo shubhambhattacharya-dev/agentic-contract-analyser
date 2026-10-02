@@ -44,6 +44,7 @@ import {
   hasEmbeddings,
   loadEmbeddings,
 } from "../../src/services/retrieval/embedding-store.service.js";
+import { ingestQueue } from "../../src/services/ingestion/queue.service.js";
 
 const PDF_FIXTURE = {
   buffer: Buffer.from("%PDF-1.7 fake pdf bytes"),
@@ -59,7 +60,8 @@ async function uploadFixture(): Promise<string> {
       contentType: PDF_FIXTURE.contentType,
     });
 
-  expect(response.status).toBe(201);
+  expect(response.status).toBe(202);
+  await ingestQueue.idle();
 
   return response.body.document.documentId as string;
 }
@@ -99,7 +101,8 @@ describe("ingestion seam (upload -> extract -> chunk -> BM25 -> embed -> persist
         contentType: PDF_FIXTURE.contentType,
       });
 
-    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.status).toBe(202);
+    await ingestQueue.idle();
 
     const documentId = uploadResponse.body.document.documentId as string;
 

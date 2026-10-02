@@ -46,12 +46,31 @@ vi.mock("../../src/services/retrieval/embedding.service.js", () => ({
 
 import { app } from "../../src/app.js";
 import { redis } from "../../src/lib/redis.js";
+import { ingestQueue } from "../../src/services/ingestion/queue.service.js";
 
 const PDF_FIXTURE = {
   buffer: Buffer.from("%PDF-1.7 fake pdf bytes"),
   filename: "contract.pdf",
   contentType: "application/pdf",
 } as const;
+
+/** Uploads and waits for the background ingestion queue to settle. */
+async function uploadAndProcess(overrides: {
+  buffer?: Buffer;
+  filename?: string;
+  contentType?: string;
+} = {}) {
+  const response = await request(app)
+    .post("/api/upload")
+    .attach("file", overrides.buffer ?? PDF_FIXTURE.buffer, {
+      filename: overrides.filename ?? PDF_FIXTURE.filename,
+      contentType: overrides.contentType ?? PDF_FIXTURE.contentType,
+    });
+
+  await ingestQueue.idle();
+
+  return response;
+}
 
 describe("POST /api/upload (ingestion seam)", () => {
   beforeEach(() => {
@@ -80,24 +99,35 @@ describe("POST /api/upload (ingestion seam)", () => {
     await redis.flushdb();
   });
 
-  it("uploads a valid PDF through the full seam and returns the document record", async () => {
-    const response = await request(app)
-      .post("/api/upload")
-      .attach("file", PDF_FIXTURE.buffer, {
-        filename: PDF_FIXTURE.filename,
-        contentType: PDF_FIXTURE.contentType,
-      });
+  it("accepts a valid PDF with 202, processes it in the queue, and reports ready", async () => {
+    const response = await uploadAndProcess();
 
-    expect(response.status).toBe(201);
-    expect(response.body.message).toBe(
-      "Document uploaded and processed successfully.",
-    );
+    expect(response.status).toBe(202);
+    expect(response.body.message).toContain("background");
     expect(response.body.document.documentId).toBeDefined();
     expect(response.body.document.originalName).toBe("contract.pdf");
-    expect(response.body.document.pageCount).toBe(2);
-    expect(response.body.document.parentChunkCount).toBeGreaterThan(0);
-    expect(response.body.document.childChunkCount).toBeGreaterThan(0);
-    expect(response.body.status).toBe("ready");
+    expect(response.body.status).toBe("queued");
+
+    const documentId = response.body.document.documentId as string;
+    const cookie = response.headers["set-cookie"][0].split(";")[0];
+
+    const status = await request(app)
+      .get(`/api/documents/${documentId}/status`)
+      .set("Cookie", cookie);
+
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe("ready");
+    expect(status.body.document.pageCount).toBe(2);
+
+    const library = await request(app)
+      .get("/api/documents")
+      .set("Cookie", cookie);
+
+    expect(library.status).toBe(200);
+    expect(library.body.documents).toHaveLength(1);
+    expect(library.body.documents[0].pageCount).toBe(2);
+    expect(library.body.documents[0].parentChunkCount).toBeGreaterThan(0);
+    expect(library.body.documents[0].status).toBe("ready");
   });
 
   it("rejects files without a file field", async () => {
@@ -133,31 +163,110 @@ describe("POST /api/upload (ingestion seam)", () => {
     expect(response.body.error.code).toBe("DOCUMENT_TOO_LARGE");
   });
 
-  it("rejects scanned PDFs with 422 and saves nothing", async () => {
+  it("fails scanned PDFs asynchronously and leaves the library clean", async () => {
     getTextMock.mockResolvedValue({ pages: [{ text: "" }] });
 
-    const response = await request(app)
-      .post("/api/upload")
-      .attach("file", PDF_FIXTURE.buffer, {
-        filename: "scanned.pdf",
-        contentType: PDF_FIXTURE.contentType,
-      });
+    const response = await uploadAndProcess({ filename: "scanned.pdf" });
 
-    expect(response.status).toBe(422);
-    expect(response.body.error.code).toBe("SCANNED_DOCUMENT");
+    expect(response.status).toBe(202);
+    expect(response.body.status).toBe("queued");
+
+    const documentId = response.body.document.documentId as string;
+    const cookie = response.headers["set-cookie"][0].split(";")[0];
+
+    const status = await request(app)
+      .get(`/api/documents/${documentId}/status`)
+      .set("Cookie", cookie);
+
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe("failed");
+    expect(status.body.error).toContain("scanned");
+
+    const library = await request(app)
+      .get("/api/documents")
+      .set("Cookie", cookie);
+
+    expect(library.status).toBe(200);
+    expect(library.body.documents).toHaveLength(0);
   });
 
-  it("rejects unreadable PDFs with 422", async () => {
+  it("fails unreadable PDFs asynchronously with the failed status", async () => {
     getTextMock.mockRejectedValue(new Error("bad pdf structure"));
 
+    const response = await uploadAndProcess({ filename: "broken.pdf" });
+
+    expect(response.status).toBe(202);
+    expect(response.body.status).toBe("queued");
+
+    const documentId = response.body.document.documentId as string;
+    const cookie = response.headers["set-cookie"][0].split(";")[0];
+
+    const status = await request(app)
+      .get(`/api/documents/${documentId}/status`)
+      .set("Cookie", cookie);
+
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe("failed");
+  });
+
+  it("answers chat with a still-processing notice while the document is in the queue", async () => {
+    // Gate the pipeline at the embed stage so the queue is deterministically
+    // mid-job (status "processing") when the chat request arrives.
+    let releaseEmbeddings: (() => void) | undefined;
+    embedChunksMock.mockImplementation(
+      async () =>
+        await new Promise<{ embeddings: unknown[]; model: string; dimensions: number }>(
+          (resolve) => {
+            releaseEmbeddings = () =>
+              resolve({
+                embeddings: [],
+                model: "mock-embedding",
+                dimensions: 4,
+              });
+          },
+        ),
+    );
+
     const response = await request(app)
       .post("/api/upload")
       .attach("file", PDF_FIXTURE.buffer, {
-        filename: "broken.pdf",
+        filename: PDF_FIXTURE.filename,
         contentType: PDF_FIXTURE.contentType,
       });
 
-    expect(response.status).toBe(422);
-    expect(response.body.error.code).toBe("SCANNED_DOCUMENT");
+    expect(response.status).toBe(202);
+
+    const documentId = response.body.document.documentId as string;
+    const cookie = response.headers["set-cookie"][0].split(";")[0];
+
+    const chat = await request(app)
+      .post("/api/chat")
+      .set("Cookie", cookie)
+      .send({ documentIds: [documentId], message: "What is the cap?" });
+
+    expect(chat.status).toBe(200);
+    expect(chat.headers["content-type"]).toContain("text/event-stream");
+    expect(chat.text).toContain('"type":"error"');
+    expect(chat.text).toContain("still processing");
+
+    // Let the queue finish: the worker may still be in the BM25 stage, so
+    // wait until the embed gate actually exists before releasing it.
+    await new Promise<void>((done) => {
+      const poll = setInterval(() => {
+        if (releaseEmbeddings) {
+          clearInterval(poll);
+          releaseEmbeddings();
+          done();
+        }
+      }, 5);
+    });
+
+    await ingestQueue.idle();
+
+    const status = await request(app)
+      .get(`/api/documents/${documentId}/status`)
+      .set("Cookie", cookie);
+
+    expect(status.body.status).toBe("ready");
   });
-})
+});

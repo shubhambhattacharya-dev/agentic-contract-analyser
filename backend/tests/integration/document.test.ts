@@ -44,6 +44,7 @@ vi.mock("../../src/services/retrieval/embedding.service.js", () => ({
 import { app } from "../../src/app.js";
 import { redis } from "../../src/lib/redis.js";
 import { keys, store } from "../../src/lib/store.js";
+import { ingestQueue } from "../../src/services/ingestion/queue.service.js";
 
 const PDF_FIXTURE = {
   buffer: Buffer.from("%PDF-1.7 mock pdf content for document library"),
@@ -64,7 +65,11 @@ async function uploadDoc(sessionCookie?: string, filename = PDF_FIXTURE.filename
   }
 
   const res = await req;
-  expect(res.status).toBe(201);
+  expect(res.status).toBe(202);
+
+  // The upload enqueues background ingestion; wait for it to settle so the
+  // downstream assertions see the fully processed document.
+  await ingestQueue.idle();
 
   const cookie =
     sessionCookie ??

@@ -16,7 +16,15 @@ export interface DocumentMeta {
   childChunkCount: number;
   sizeBytes: number;
   createdAt: string;
+  /** "processing" until the background queue commits, then "ready". */
+  status?: "processing" | "ready";
 }
+
+export type DocumentProcessingStatus =
+  | "queued"
+  | "processing"
+  | "ready"
+  | "failed";
 
 export interface DocumentPage {
   pageNumber: number;
@@ -139,7 +147,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface UploadResult {
-  document: DocumentMeta;
+  document: {
+    documentId: string;
+    originalName: string;
+    mimeType?: string;
+    size?: number;
+  };
+  /** 202 responses carry "queued" — processing continues in the background. */
+  status: DocumentProcessingStatus;
+}
+
+export interface DocumentStatusResult {
+  documentId: string;
+  status: DocumentProcessingStatus;
+  error?: string;
+  document?: {
+    originalName: string;
+    mimeType: string;
+    pageCount: number;
+    charCount: number;
+  };
 }
 
 /** Multipart upload with progress (XHR — fetch has no upload progress). */
@@ -161,7 +188,7 @@ export function uploadDocument(
     };
 
     xhr.onload = () => {
-      if (xhr.status === 201) {
+      if (xhr.status === 200 || xhr.status === 202) {
         try {
           resolve(JSON.parse(xhr.responseText) as UploadResult);
         } catch {
@@ -210,9 +237,7 @@ export const api = {
     request<{ document: DocumentMeta }>(`/api/documents/${docId}`),
 
   getDocumentStatus: (docId: string) =>
-    request<{ documentId: string; status: string }>(
-      `/api/documents/${docId}/status`,
-    ),
+    request<DocumentStatusResult>(`/api/documents/${docId}/status`),
 
   getDocumentContent: (docId: string) =>
     request<DocumentContent>(`/api/documents/${docId}/content`),
@@ -306,8 +331,53 @@ export const api = {
   },
 };
 
-/** Parses one SSE frame ("data: {...}\n" lines) into typed chat events. */
-export function parseSseFrame(frame: string): ChatSseEvent[] {
+const POLL_INTERVAL_MS = 1500;
+const POLL_MAX_WAIT_MS = 5 * 60 * 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Polls a queued document until the background ingestion finishes.
+ * Resolves on "ready"; throws ApiError on "failed" or when polling times out.
+ * The document keeps processing server-side even if the caller stops
+ * waiting — the library reflects the outcome either way.
+ */
+export async function waitForDocument(
+  documentId: string,
+  onTick?: (status: DocumentProcessingStatus) => void,
+): Promise<void> {
+  const deadline = Date.now() + POLL_MAX_WAIT_MS;
+
+  while (Date.now() < deadline) {
+    await sleep(POLL_INTERVAL_MS);
+
+    const result = await api.getDocumentStatus(documentId);
+
+    onTick?.(result.status);
+
+    if (result.status === "ready") {
+      return;
+    }
+
+    if (result.status === "failed") {
+      throw new ApiError(
+        result.error ?? "Document processing failed.",
+        422,
+        "PROCESSING_FAILED",
+      );
+    }
+  }
+
+  throw new ApiError(
+    "The document is taking unusually long to process. Check the library in a moment — it keeps processing even if you leave this page.",
+    504,
+    "PROCESSING_TIMEOUT",
+  );
+}
+
+/** Parses one SSE frame ("data: {...}\n" lines) into typed chat events. */export function parseSseFrame(frame: string): ChatSseEvent[] {
   const events: ChatSseEvent[] = [];
 
   for (const line of frame.split("\n")) {

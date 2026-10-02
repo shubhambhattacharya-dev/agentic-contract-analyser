@@ -207,6 +207,60 @@ const IngestionSchema = z.object({
     .int()
     .positive()
     .default(60),
+
+  // Per-job hard timeout for background ingestion. Generous by design:
+  // the job no longer runs inside an HTTP request, so a 150-page PDF with
+  // real embeddings gets minutes, not seconds.
+  INGEST_JOB_TIMEOUT_SEC: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(300),
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4b. RATE LIMITING
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Fixed-window counters in Redis, keyed per session with a per-IP ceiling
+// (sessions are anonymous cookies, so a session key alone is trivially
+// bypassable by dropping cookies — the IP ceiling closes that gap).
+const RateLimitSchema = z.object({
+  RATE_LIMIT_UPLOAD_MAX: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10),
+
+  RATE_LIMIT_UPLOAD_WINDOW_SEC: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(600),
+
+  RATE_LIMIT_CHAT_MAX: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30),
+
+  RATE_LIMIT_CHAT_WINDOW_SEC: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(600),
+
+  RATE_LIMIT_COMPARE_MAX: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(20),
+
+  RATE_LIMIT_COMPARE_WINDOW_SEC: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(600),
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -220,6 +274,7 @@ const EnvSchema = z
   .merge(ModelRoutingSchema)
   .merge(InfraSchema)
   .merge(IngestionSchema)
+  .merge(RateLimitSchema)
   .superRefine((value, ctx) => {
     // Fail fast: production needs managed Redis + Blob credentials at boot,
     // not at first request.

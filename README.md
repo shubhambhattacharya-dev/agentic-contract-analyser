@@ -10,8 +10,15 @@ the document at the exact verified passage, highlighted.
 
 ## Features (all implemented and tested)
 
-- **PDF / DOCX upload** — clear rejection of other types; scanned (text-less)
-  PDFs are refused with a 422 and nothing is saved
+- **PDF / DOCX upload** — clear rejection of other types; the upload request
+  returns **202 immediately** (store + library entry + queue) and ingestion
+  runs in a background worker with real `queued → processing → ready/failed`
+  status polling; scanned (text-less) PDFs fail asynchronously and never
+  stay in the library
+- **Rate limiting** — Redis-backed fixed-window counters on the LLM-spending
+  endpoints (`upload`, `chat`, `compare`), per session with a per-IP ceiling
+  (sessions are anonymous cookies and trivially rotated); `429` +
+  `RateLimit-*` + `Retry-After` headers; fails open if Redis is unreachable
 - **Document library** — list, open, delete (deletes indexes + chats too),
   per-session isolation, processing status
 - **Grounded chat** — retrieval → evidence gate → (agent) → generation →
@@ -43,7 +50,9 @@ frontend/  Next.js 14 (App Router) + Tailwind — Vercel
   src/components/ sidebar, library, chat, viewer, sections, metadata, compare
 backend/   Express 5 + TypeScript (strict) API server — Render
   services/
-    ingestion/     extract (pdf-parse/mammoth) → structure → offset-true chunks
+    ingestion/     upload returns 202 → in-process FIFO queue (concurrency 1,
+                   hard per-job timeout, boot recovery for interrupted jobs)
+                   → extract (pdf-parse/mammoth) → structure → offset-true chunks
     retrieval/     BM25 + Gemini embeddings + RRF fusion + evidence gate
     ai/            provider abstraction (Groq/Gemini + fallback), agent loop,
                    tool registry, trusted tool executor
@@ -51,6 +60,8 @@ backend/   Express 5 + TypeScript (strict) API server — Render
     comparison/    clause alignment, severity classification, summaries
   lib/             Redis/Blob storage gateway (dev: ioredis + local FS,
                    prod: Upstash REST + Vercel Blob) + Langfuse tracing
+  middleware/      CORS, error contract, request-id, sessions, multer,
+                   Redis-backed rate limiting
 ```
 
 **Design law: the LLM proposes; deterministic code disposes.** Model output is
@@ -102,10 +113,12 @@ verifier, so the agent cannot bypass grounding.
 
 ## Testing
 
-- Backend: **285 tests** (unit + integration) — chunker invariants and
+- Backend: **301 tests** (unit + integration) — chunker invariants and
   hardening (structured text, oversized tokens), BM25, stores, retrieval,
-  verifier red-team cases, agent-loop safety, comparison, upload seam,
-  library, deletion cleanup, session isolation, ghost-document protection.
+  verifier red-team cases, agent-loop safety, comparison, upload seam
+  (202 → queue → ready/failed/cleanup), rate limiting (unit with injected
+  counters + real-Redis window semantics), library, deletion cleanup,
+  session isolation, ghost-document protection.
 - Frontend: **17 tests** — SSE parsing, highlight math, upload validation.
 - CI: GitHub Actions — secret scan → backend (typecheck, tests, build against
   a live Redis) → frontend (typecheck, tests, build).
@@ -113,8 +126,13 @@ verifier, so the agent cannot bypass grounding.
 
 ## Known limitations
 
-- Ingestion runs synchronously within the upload request; very large PDFs
-  (>100 pages) can take a minute to process and there is no resumable queue.
+- Ingestion runs in an **in-process queue**: a single Render web service has
+  no separate worker, so a restart mid-processing loses the job — boot
+  recovery marks interrupted documents `failed` and cleans them up, and the
+  user re-uploads. A durable queue (e.g. BullMQ + separate worker service)
+  is the next step for multi-instance deployments.
+- Rate limits are per-session + per-IP on the LLM-spending endpoints only;
+  there is no authentication (assignment constraint: no login, single user).
 - 150-page support is verified end-to-end with BM25-only retrieval (embeddings
   mocked) — the real-embedding run is gated on the free Gemini tier's daily
   quota; chunk/page/verify pipeline is identical either way.

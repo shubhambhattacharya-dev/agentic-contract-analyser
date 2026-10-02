@@ -125,6 +125,34 @@ export async function* chatService(
       .map((entry) => entry.documentId);
 
     if (missing.length > 0) {
+      // Distinguish "still processing" from "gone": a queued/processing
+      // document has no chunks yet but is not broken.
+      const stillProcessing = (
+        await Promise.all(
+          missing.map((documentId) =>
+            store.getDocumentStatus(sessionId, documentId),
+          ),
+        )
+      ).some(
+        (record) =>
+          record?.state === "queued" || record?.state === "processing",
+      );
+
+      if (stillProcessing) {
+        logger.info(
+          { sessionId, missing },
+          "Chat rejected: selected document(s) are still processing.",
+        );
+
+        yield {
+          type: "error",
+          message:
+            "One or more selected documents are still processing. Try again in a few seconds.",
+        };
+
+        return;
+      }
+
       logger.warn(
         { sessionId, missing },
         "Chat rejected: selected document(s) have no indexed chunks.",
